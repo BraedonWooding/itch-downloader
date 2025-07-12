@@ -8,8 +8,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::fs::File as StdFile;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use tokio::time::sleep;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zip::ZipArchive;
 
@@ -94,6 +96,48 @@ async fn unzip_file(zip_path: &PathBuf, extract_to: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Make an HTTP request with retry logic for 429 errors
+async fn make_request_with_retry(
+    client: &Client,
+    url: &str,
+    query_params: &[(&str, u64)],
+    api_key: &str,
+    max_retries: u32,
+) -> Result<reqwest::Response> {
+    let mut attempt = 0;
+
+    loop {
+        let response = client
+            .get(url)
+            .bearer_auth(api_key)
+            .query(query_params)
+            .send()
+            .await
+            .context("Failed to send request to itch.io API")?;
+
+        match response.status() {
+            reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                attempt += 1;
+                if attempt > max_retries {
+                    return Err(anyhow::anyhow!(
+                        "Too many requests (429) - exceeded max retries ({})",
+                        max_retries
+                    ));
+                }
+
+                let retry_delay = Duration::from_millis(1000 + (attempt as u64 * 500)); // 1s, 1.5s, 2s, etc.
+                println!(
+                    "Rate limited (429), retrying in {:?} (attempt {}/{})",
+                    retry_delay, attempt, max_retries
+                );
+                sleep(retry_delay).await;
+                continue;
+            }
+            _ => return Ok(response),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "itch-downloader")]
 #[command(about = "A CLI tool for interacting with itch.io API")]
@@ -131,7 +175,7 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
         /// Maximum number of concurrent downloads
-        #[arg(long, default_value = "16")]
+        #[arg(long, default_value = "3")]
         max_concurrent: usize,
         /// Automatically unzip downloaded files
         #[arg(long)]
@@ -221,14 +265,14 @@ impl ItchClient {
         loop {
             println!("Fetching page {}...", page);
 
-            let response = self
-                .client
-                .get(url)
-                .bearer_auth(&self.api_key)
-                .query(&[("page", page)])
-                .send()
-                .await
-                .context("Failed to send request to itch.io API")?;
+            let response = make_request_with_retry(
+                &self.client,
+                url,
+                &[("page", page)],
+                &self.api_key,
+                3, // max retries
+            )
+            .await?;
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -254,6 +298,9 @@ impl ItchClient {
             }
 
             page += 1;
+
+            // Add delay between requests to avoid rate limiting
+            sleep(Duration::from_millis(1000)).await;
         }
 
         println!(
@@ -267,14 +314,17 @@ impl ItchClient {
     async fn get_game_uploads(&self, game_id: u64, download_key_id: u64) -> Result<Vec<Upload>> {
         let url = format!("https://api.itch.io/games/{}/uploads", game_id);
 
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .query(&[("download_key_id", download_key_id)])
-            .send()
-            .await
-            .context("Failed to send request to itch.io API")?;
+        // Add delay before making request to avoid rate limiting
+        sleep(Duration::from_millis(1000)).await;
+
+        let response = make_request_with_retry(
+            &self.client,
+            &url,
+            &[("download_key_id", download_key_id)],
+            &self.api_key,
+            3, // max retries
+        )
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -307,46 +357,75 @@ impl ItchClient {
             upload_id, download_key_id
         );
 
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.api_key)
-            .send()
-            .await
-            .context("Failed to send download request")?;
+        // Add delay before making request to avoid rate limiting
+        sleep(Duration::from_millis(1000)).await;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Download request failed with status {}: {}",
-                status,
-                text
-            ));
-        }
+        let mut attempt = 0;
+        let max_retries = 3;
 
-        let total_size = response.content_length().unwrap_or(0);
-        progress_bar.set_length(total_size);
-
-        let file_path = output_path.join(filename);
-        let mut file = File::create(&file_path)
-            .await
-            .context("Failed to create output file")?;
-
-        let mut stream = response.bytes_stream();
-        let mut downloaded = 0u64;
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Failed to read chunk from response")?;
-            file.write_all(&chunk)
+        loop {
+            let response = self
+                .client
+                .get(&url)
+                .bearer_auth(&self.api_key)
+                .send()
                 .await
-                .context("Failed to write chunk to file")?;
-            downloaded += chunk.len() as u64;
-            progress_bar.set_position(downloaded);
-        }
+                .context("Failed to send download request")?;
 
-        progress_bar.finish_with_message(format!("Downloaded {}", filename));
-        Ok(())
+            match response.status() {
+                reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    attempt += 1;
+                    if attempt > max_retries {
+                        return Err(anyhow::anyhow!(
+                            "Download failed: Too many requests (429) - exceeded max retries ({})",
+                            max_retries
+                        ));
+                    }
+
+                    let retry_delay = Duration::from_millis(1000 + (attempt as u64 * 500));
+                    progress_bar.set_message(format!(
+                        "Rate limited, retrying {} in {:?}...",
+                        filename, retry_delay
+                    ));
+                    sleep(retry_delay).await;
+                    progress_bar.set_message(format!("Downloading {}", filename));
+                    continue;
+                }
+                status if !status.is_success() => {
+                    let text = response.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!(
+                        "Download request failed with status {}: {}",
+                        status,
+                        text
+                    ));
+                }
+                _ => {
+                    // Success, proceed with download
+                    let total_size = response.content_length().unwrap_or(0);
+                    progress_bar.set_length(total_size);
+
+                    let file_path = output_path.join(filename);
+                    let mut file = File::create(&file_path)
+                        .await
+                        .context("Failed to create output file")?;
+
+                    let mut stream = response.bytes_stream();
+                    let mut downloaded = 0u64;
+
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.context("Failed to read chunk from response")?;
+                        file.write_all(&chunk)
+                            .await
+                            .context("Failed to write chunk to file")?;
+                        downloaded += chunk.len() as u64;
+                        progress_bar.set_position(downloaded);
+                    }
+
+                    progress_bar.finish_with_message(format!("Downloaded {}", filename));
+                    return Ok(());
+                }
+            }
+        }
     }
 }
 

@@ -8,6 +8,8 @@ A command-line tool for downloading and managing your purchased assets from itch
 - 🔍 **Filtering**: Filter assets by author or title
 - ⚡ **Parallel downloads**: Download multiple assets concurrently
 
+Note: due to itch.io's pretty heavy rate limiting we only download 3 packages at once by default and use pretty heavy sleeping in-between downloading (should still be faster than doing this manually).
+
 ## Installation
 
 ### From Releases
