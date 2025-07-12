@@ -14,6 +14,8 @@ A command-line tool for downloading and managing your purchased assets from itch
 
 Check out the tab https://github.com/BraedonWooding/itch-downloader/releases to find all the release binaries that you can just download immediately.
 
+Just copy that into your path!
+
 ### From Source
 
 1. Make sure you have Rust installed. If not, install it from [rustup.rs](https://rustup.rs/)
