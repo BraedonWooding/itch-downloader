@@ -1,0 +1,22 @@
+[package]
+name = "itch-downloader"
+version = "0.1.0"
+edition = "2024"
+license-file = "LICENSE.txt"
+description = "Download itch.io assets easily"
+repository = "https://github.com/BraedonWooding/itch-downloader"
+readme = "README.md"
+homepage = "https://github.com/BraedonWooding/itch-downloader"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.46", features = ["full"] }
+anyhow = "1.0"
+unicode-width = "0.2"
+indicatif = "0.18"
+futures = "0.3"
+zip = "4.3"
+tokio-util = { version = "0.7", features = ["io"] }
