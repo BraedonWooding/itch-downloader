@@ -1,18 +1,18 @@
 # itch-downloader
 
-A command-line tool for downloading and managing your purchased games from itch.io using the itch.io API.
+A command-line tool for downloading and managing your purchased assets from itch.io using the itch.io API.
 
 ## Features
 
-- 📋 **List your games**: View all your purchased games from itch.io
-- ⬇️ **Download games**: Download your purchased games with progress tracking
 - 🗜️ **Auto-extract**: Automatically unzip downloaded files
-- 🔍 **Filtering**: Filter games by author or title
-- ⚡ **Parallel downloads**: Download multiple games concurrently
-- 🌍 **Unicode support**: Proper handling of emojis and Unicode characters in game titles
-- 📊 **Progress tracking**: Real-time download progress with visual progress bars
+- 🔍 **Filtering**: Filter assets by author or title
+- ⚡ **Parallel downloads**: Download multiple assets concurrently
 
 ## Installation
+
+### From Releases
+
+Check out the tab https://github.com/BraedonWooding/itch-downloader/releases to find all the release binaries that you can just download immediately.
 
 ### From Source
 
@@ -39,37 +39,31 @@ You can provide the API key in two ways:
 
 ### Commands
 
-#### List Games (`ls`)
+#### List Assets (`ls`)
 
-List all your purchased games:
+List all your purchased assets:
 
 ```bash
-# List all games
+# List all assets
 itch-downloader ls
 
-# List games with API key
+# List assets with API key
 itch-downloader ls --api-key YOUR_API_KEY
 
 # Filter by author
-itch-downloader ls --author "Supergiant Games"
-
-# Filter by title (contains match)
-itch-downloader ls --title "puzzle"
-
-# Combine filters
-itch-downloader ls --author "indie" --title "adventure"
+itch-downloader ls --author "Krishna" --title "Creature"
 ```
 
-#### Download Games (`dl`)
+#### Download Assets (`dl`)
 
-Download your purchased games:
+Download your purchased assets:
 
 ```bash
-# Download all games
+# Download all assets
 itch-downloader dl
 
 # Download to specific directory
-itch-downloader dl --output ./my-games
+itch-downloader dl --output ./my-assets
 
 # Download and automatically unzip
 itch-downloader dl --unzip
@@ -77,11 +71,11 @@ itch-downloader dl --unzip
 # Download with custom concurrency (default: 16)
 itch-downloader dl --max-concurrent 5
 
-# Download specific games by filter
-itch-downloader dl --author "Klei Entertainment" --unzip
+# Download specific assets by filter
+itch-downloader dl --author "Krishna" --unzip
 
-# Download games matching title
-itch-downloader dl --title "soundtrack" --output ./music
+# Download assets matching title
+itch-downloader dl --title "Minifantasy" --output ./minifantasy
 ```
 
 ### Command Options
@@ -98,53 +92,20 @@ itch-downloader dl --title "soundtrack" --output ./music
 - `--max-concurrent`: Maximum number of concurrent downloads (default: 16)
 - `--unzip`: Automatically extract downloaded ZIP files
 
-## Examples
-
-### Basic Usage
-
-```bash
-# Set API key as environment variable
-export ITCH_API_KEY="your_api_key_here"
-
-# List all your games
-itch-downloader ls
-
-# Download all games to a games folder and extract them
-itch-downloader dl --output ./games --unzip
-```
-
-### Advanced Filtering
-
-```bash
-# Find all puzzle games
-itch-downloader ls --title "puzzle"
-
-# Download all games from a specific author
-itch-downloader dl --author "Team Cherry" --unzip
-
-# Download soundtracks only
-itch-downloader dl --title "soundtrack" --output ./music
-```
-
-### Bulk Operations
-
-```bash
-# Download everything with controlled concurrency
-itch-downloader dl --max-concurrent 3 --unzip --output ./complete-library
-
-# Download only games with "demo" in the title
-itch-downloader dl --title "demo" --output ./demos
-```
-
 ## Output Format
 
 ### List Command
-The `ls` command displays games in a table format:
+The `ls` command displays assets in a table format:
 ```
 ID       Author               Title
 -------- -------------------- ----------------------------------------
-1234567  Supergiant Games     Hades
-2345678  Team Cherry          Hollow Knight
+3690241  Krishna Palacio      Minifantasy👤Portrait Generator
+3545506  Krishna Palacio      Minifantasy 🐍 Temple Of The Snake...
+3626565  Krishna Palacio      Minifantasy🪄Spell Effects II
+3507103  Krishna Palacio      Minifantasy 😈 True Villains I
+3462664  Krishna Palacio      Minifantasy 📲 UI Overhaul
+3379634  Krishna Palacio      Minifantasy 🌀 Warp Lands
+3290995  Krishna Palacio      Minifantasy⚔️True Heroes IV
 ```
 
 ### Download Command
@@ -156,7 +117,7 @@ The `dl` command shows:
 
 ## File Organization
 
-When using the `--unzip` option, games are organized as follows:
+When using the `--unzip` option, assets are organized as follows:
 ```
 output-directory/
 ├── Game Title 1/
@@ -168,23 +129,6 @@ output-directory/
 
 ZIP files are automatically removed after successful extraction.
 
-## Error Handling
-
-The tool handles various error conditions gracefully:
-- Invalid API keys
-- Network connectivity issues
-- Missing or corrupted downloads
-- Failed extractions (original ZIP file is preserved)
-
-## Technical Details
-
-- **Language**: Rust
-- **Async Runtime**: Tokio
-- **HTTP Client**: reqwest
-- **Progress Bars**: indicatif
-- **CLI Framework**: clap
-- **Archive Handling**: zip crate
-
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues and pull requests.
@@ -195,4 +139,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Disclaimer
 
-This tool is not officially affiliated with itch.io. It uses the public itch.io API to access your purchased games. Please use responsibly and in accordance with itch.io's terms of service.
+This tool is not officially affiliated with itch.io. It uses the public itch.io API to access your purchased assets. Please use responsibly and in accordance with itch.io's terms of service.
+
+This tool was written pretty heavily using AI and while I have verified and written parts of it, it could possibly contain bugs and other issues.
