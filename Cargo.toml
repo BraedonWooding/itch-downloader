@@ -2,6 +2,7 @@
 name = "itch-downloader"
 version = "0.1.1"
 edition = "2024"
+license = "MIT"
 license-file = "LICENSE"
 description = "Download itch.io assets easily"
 repository = "https://github.com/BraedonWooding/itch-downloader"
