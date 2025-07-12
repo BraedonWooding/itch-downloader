@@ -68,28 +68,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            rustflags: -Clink-arg=-Wl,--compress-debug-sections=zlib
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            rustflags: -Clink-arg=-Wl,--compress-debug-sections=zlib
-          - target: armv7-unknown-linux-gnueabihf
-            os: ubuntu-latest
-            rustflags: -Clink-arg=-Wl,--compress-debug-sections=zlib
-          - target: armv7-unknown-linux-musleabihf
-            os: ubuntu-latest
-            rustflags: -Clink-arg=-Wl,--compress-debug-sections=zlib
-          - target: i686-unknown-linux-gnu
-            os: ubuntu-latest
-            rustflags: -Clink-arg=-Wl,--compress-debug-sections=zlib
-          - target: i686-unknown-linux-musl
-            os: ubuntu-latest
-            rustflags: -Clink-arg=-Wl,--compress-debug-sections=zlib
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            rustflags: -Clink-arg=-Wl,--compress-debug-sections=zlib
-          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             rustflags: -Clink-arg=-Wl,--compress-debug-sections=zlib
           - target: x86_64-pc-windows-msvc

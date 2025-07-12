@@ -1,0 +1,3 @@
+accepted = ["MIT", "Unicode-3.0", "bzip2-1.0.6", "Zlib", "Apache-2.0"]
+ignore-dev-dependencies = true
+private.ignore = true
