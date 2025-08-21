@@ -63,14 +63,17 @@ async fn unzip_file(zip_path: &PathBuf, extract_to: &PathBuf) -> Result<()> {
         let file = StdFile::open(&zip_path).context("Failed to open zip file")?;
         let mut archive = ZipArchive::new(file).context("Failed to read zip archive")?;
 
-        std::fs::create_dir_all(&extract_to).context("Failed to create extraction directory")?;
+        // First, extract to a temporary directory to check for single-folder structure
+        let temp_extract = extract_to.with_extension("temp_extract");
+        std::fs::create_dir_all(&temp_extract)
+            .context("Failed to create temporary extraction directory")?;
 
         for i in 0..archive.len() {
             let mut file = archive
                 .by_index(i)
                 .context("Failed to get file from archive")?;
             let outpath = match file.enclosed_name() {
-                Some(path) => extract_to.join(path),
+                Some(path) => temp_extract.join(path),
                 None => continue,
             };
 
@@ -87,6 +90,55 @@ async fn unzip_file(zip_path: &PathBuf, extract_to: &PathBuf) -> Result<()> {
                 std::io::copy(&mut file, &mut outfile).context("Failed to extract file")?;
             }
         }
+
+        // Check if the temporary directory contains only one subdirectory
+        let entries: Vec<_> = std::fs::read_dir(&temp_extract)
+            .context("Failed to read temporary extraction directory")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to list directory entries")?;
+
+        let directories: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+            .collect();
+
+        let files: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+            .collect();
+
+        // If there's exactly one directory and no files at the root, unwrap it
+        if directories.len() == 1 && files.is_empty() {
+            let single_dir = directories[0].path();
+            std::fs::create_dir_all(&extract_to)
+                .context("Failed to create final extraction directory")?;
+
+            // Move contents of the single directory to the target directory
+            let move_entries: Vec<_> = std::fs::read_dir(&single_dir)
+                .context("Failed to read single directory")?
+                .collect::<Result<Vec<_>, _>>()
+                .context("Failed to list single directory entries")?;
+
+            for entry in move_entries {
+                let source = entry.path();
+                let dest = extract_to.join(entry.file_name());
+                std::fs::rename(&source, &dest)
+                    .context("Failed to move file from single directory")?;
+            }
+        } else {
+            // Multiple items at root, move everything as-is
+            std::fs::create_dir_all(&extract_to)
+                .context("Failed to create final extraction directory")?;
+
+            for entry in entries {
+                let source = entry.path();
+                let dest = extract_to.join(entry.file_name());
+                std::fs::rename(&source, &dest).context("Failed to move extracted content")?;
+            }
+        }
+
+        // Clean up temporary directory
+        std::fs::remove_dir_all(&temp_extract).context("Failed to remove temporary directory")?;
 
         Ok::<(), anyhow::Error>(())
     })
@@ -206,7 +258,6 @@ struct Game {
     cover_url: Option<String>,
     still_cover_url: Option<String>,
     min_price: Option<u64>,
-    traits: Vec<String>,
     user: User,
 }
 
@@ -298,9 +349,6 @@ impl ItchClient {
             }
 
             page += 1;
-
-            // Add delay between requests to avoid rate limiting
-            sleep(Duration::from_millis(1000)).await;
         }
 
         println!(

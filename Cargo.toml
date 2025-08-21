@@ -1,6 +1,6 @@
 [package]
 name = "itch-downloader"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 license-file = "LICENSE"
 description = "Download itch.io assets easily"
