@@ -19,4 +19,5 @@ unicode-width = "0.2"
 indicatif = "0.18"
 futures = "0.3"
 zip = "4.3"
+tempfile = "3"
 tokio-util = { version = "0.7", features = ["io"] }

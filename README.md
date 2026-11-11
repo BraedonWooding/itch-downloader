@@ -72,8 +72,14 @@ itch-downloader dl --output ./my-assets
 # Download and automatically unzip
 itch-downloader dl --unzip
 
-# Download with custom concurrency (default: 16)
+# Download with custom concurrency (default: 3)
 itch-downloader dl --max-concurrent 5
+
+# Organize files by author and item, and extract ZIPs
+itch-downloader dl --layout author-title --unzip
+
+# Include alternate formats such as assets.zip AND assets.rar
+itch-downloader dl --all-files
 
 # Download specific assets by filter
 itch-downloader dl --author "Krishna" --unzip
@@ -93,8 +99,17 @@ itch-downloader dl --title "Minifantasy" --output ./minifantasy
 
 #### Download Options (for `dl` command)
 - `--output, -o`: Output directory for downloads (default: current directory)
-- `--max-concurrent`: Maximum number of concurrent downloads (default: 16)
-- `--unzip`: Automatically extract downloaded ZIP files
+- `--max-concurrent`: Maximum number of concurrent purchases downloading (default: 3; must be at least 1). Files within a purchase download sequentially.
+- `--all-files`: Download every upload, including alternate extensions with the same filename stem
+- `--layout`: `flat` (default), `title`, or `author-title`
+- `--unzip`: Automatically extract downloaded ZIP files; other archive formats remain as downloaded files
+- `--keep-archive-root`: With `--unzip`, preserve a ZIP's single enclosing folder instead of collapsing it
+
+### File Selection
+
+By default, downloads include one file for each unique filename without its extension, compared case-insensitively. For example, `part1.zip`, `part1.rar`, and `part2.zip` download as `part1.zip` and `part2.zip`. ZIP is preferred when available; otherwise the first format returned by itch.io is used. Compound extensions such as `.tar.gz`, `.tar.bz2`, `.tar.xz`, and `.tar.zst` count as one extension.
+
+Use `--all-files` to include every alternative. Names alone determine grouping; the tool does not compare file contents.
 
 ## Output Format
 
@@ -121,17 +136,27 @@ The `dl` command shows:
 
 ## File Organization
 
-When using the `--unzip` option, assets are organized as follows:
+`--layout flat` downloads files directly into the output directory. `--layout title` puts files under the item title; `--layout author-title` adds the author's username above it. Folder names are sanitized for Windows. Conflicting names within a run receive an ID suffix.
+
+With `--layout author-title --unzip`, a purchase with multiple selected files looks like:
 ```
 output-directory/
-├── Game Title 1/
-│   ├── extracted files...
-├── Game Title 2/
-│   ├── extracted files...
-└── ...
+└── AuthorUsername/
+    └── Item Title/
+        ├── part1.zip.contents/
+        │   └── extracted files...
+        ├── part2.zip.contents/
+        │   └── extracted files...
+        └── guide.pdf
 ```
 
-ZIP files are automatically removed after successful extraction.
+When selection leaves just one ZIP, its contents go directly into the item folder, without the extra `filename.zip.contents` directory. Each ZIP's single enclosing folder is also collapsed automatically; `--keep-archive-root` preserves that enclosing folder.
+
+With `--layout flat --unzip`, downloaded files stay in the output directory and extracted contents go under the item title using the same single/multiple-file rules. The author/title folders chosen by the other layouts are always retained.
+
+ZIP files are removed only after successful extraction. Multiple archives have separate extraction directories, including the original extension, so their contents do not overwrite each other. Existing extraction content causes an error rather than an overwrite, and the ZIP is kept. RAR, 7z, and other non-ZIP formats are not extracted.
+
+Failures are reported per file; remaining files continue downloading. The final summary reports completed and failed operations, with a nonzero exit status if any download or extraction failed.
 
 ## Contributing
 
