@@ -15,6 +15,9 @@ use tokio::time::sleep;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use zip::ZipArchive;
 
+mod downloads;
+use downloads::{DownloadOptions, plan_downloads, safe_component, unique_path};
+
 /// Truncate a string to a specific visual width, accounting for Unicode characters
 fn truncate_to_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
@@ -54,7 +57,11 @@ fn pad_to_width(s: &str, target_width: usize) -> String {
 }
 
 /// Unzip a file to the specified directory
-async fn unzip_file(zip_path: &PathBuf, extract_to: &PathBuf) -> Result<()> {
+async fn unzip_file(
+    zip_path: &PathBuf,
+    extract_to: &PathBuf,
+    keep_archive_root: bool,
+) -> Result<()> {
     let zip_path = zip_path.clone();
     let extract_to = extract_to.clone();
 
@@ -64,9 +71,10 @@ async fn unzip_file(zip_path: &PathBuf, extract_to: &PathBuf) -> Result<()> {
         let mut archive = ZipArchive::new(file).context("Failed to read zip archive")?;
 
         // First, extract to a temporary directory to check for single-folder structure
-        let temp_extract = extract_to.with_extension("temp_extract");
-        std::fs::create_dir_all(&temp_extract)
+        std::fs::create_dir_all(extract_to.parent().context("Missing extraction parent")?)?;
+        let staging = tempfile::tempdir_in(extract_to.parent().unwrap())
             .context("Failed to create temporary extraction directory")?;
+        let temp_extract = staging.path();
 
         for i in 0..archive.len() {
             let mut file = archive
@@ -92,53 +100,36 @@ async fn unzip_file(zip_path: &PathBuf, extract_to: &PathBuf) -> Result<()> {
         }
 
         // Check if the temporary directory contains only one subdirectory
-        let entries: Vec<_> = std::fs::read_dir(&temp_extract)
+        let entries: Vec<_> = std::fs::read_dir(temp_extract)
             .context("Failed to read temporary extraction directory")?
             .collect::<Result<Vec<_>, _>>()
             .context("Failed to list directory entries")?;
 
-        let directories: Vec<_> = entries
-            .iter()
-            .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-            .collect();
-
-        let files: Vec<_> = entries
-            .iter()
-            .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-            .collect();
-
         // If there's exactly one directory and no files at the root, unwrap it
-        if directories.len() == 1 && files.is_empty() {
-            let single_dir = directories[0].path();
-            std::fs::create_dir_all(&extract_to)
-                .context("Failed to create final extraction directory")?;
-
-            // Move contents of the single directory to the target directory
-            let move_entries: Vec<_> = std::fs::read_dir(&single_dir)
-                .context("Failed to read single directory")?
-                .collect::<Result<Vec<_>, _>>()
-                .context("Failed to list single directory entries")?;
-
-            for entry in move_entries {
-                let source = entry.path();
-                let dest = extract_to.join(entry.file_name());
-                std::fs::rename(&source, &dest)
-                    .context("Failed to move file from single directory")?;
-            }
-        } else {
-            // Multiple items at root, move everything as-is
-            std::fs::create_dir_all(&extract_to)
-                .context("Failed to create final extraction directory")?;
-
-            for entry in entries {
-                let source = entry.path();
-                let dest = extract_to.join(entry.file_name());
-                std::fs::rename(&source, &dest).context("Failed to move extracted content")?;
-            }
+        let entries =
+            if !keep_archive_root && entries.len() == 1 && entries[0].file_type()?.is_dir() {
+                std::fs::read_dir(entries[0].path())
+                    .context("Failed to read single directory")?
+                    .collect::<Result<Vec<_>, _>>()
+                    .context("Failed to list single directory entries")?
+            } else {
+                entries
+            };
+        // Check before moving anything; preserve the ZIP if extraction would overwrite content.
+        for entry in &entries {
+            let destination = extract_to.join(entry.file_name());
+            anyhow::ensure!(
+                !destination.try_exists()?,
+                "Extraction destination already exists: {}",
+                destination.display()
+            );
         }
-
-        // Clean up temporary directory
-        std::fs::remove_dir_all(&temp_extract).context("Failed to remove temporary directory")?;
+        std::fs::create_dir_all(&extract_to)
+            .context("Failed to create final extraction directory")?;
+        for entry in entries {
+            std::fs::rename(entry.path(), extract_to.join(entry.file_name()))
+                .context("Failed to move extracted content")?;
+        }
 
         Ok::<(), anyhow::Error>(())
     })
@@ -229,9 +220,8 @@ enum Commands {
         /// Maximum number of concurrent downloads
         #[arg(long, default_value = "3")]
         max_concurrent: usize,
-        /// Automatically unzip downloaded files
-        #[arg(long)]
-        unzip: bool,
+        #[command(flatten)]
+        options: DownloadOptions,
     },
 }
 
@@ -469,7 +459,9 @@ impl ItchClient {
                         progress_bar.set_position(downloaded);
                     }
 
-                    progress_bar.finish_with_message(format!("Downloaded {}", filename));
+                    file.flush()
+                        .await
+                        .context("Failed to flush downloaded file")?;
                     return Ok(());
                 }
             }
@@ -548,8 +540,9 @@ async fn download_packages(
     title_filter: Option<String>,
     output_path: PathBuf,
     max_concurrent: usize,
-    unzip: bool,
+    options: DownloadOptions,
 ) -> Result<()> {
+    anyhow::ensure!(max_concurrent > 0, "--max-concurrent must be at least 1");
     let api_key = api_key
         .or_else(|| std::env::var("ITCH_API_KEY").ok())
         .context("API key is required. Provide it via --api-key flag or ITCH_API_KEY environment variable")?;
@@ -601,16 +594,35 @@ async fn download_packages(
 
     let multi_progress = MultiProgress::new();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-
-    // Create download tasks
-    let download_tasks: Vec<_> = filtered_keys
+    let mut item_paths = std::collections::HashSet::new();
+    let packages: Vec<_> = filtered_keys
         .into_iter()
         .map(|key| {
+            let author_path = output_path.join(safe_component(&key.game.user.username));
+            let parent = if options.layout == downloads::Layout::AuthorTitle {
+                author_path
+            } else {
+                output_path.clone()
+            };
+            let item_path = unique_path(
+                &parent.join(safe_component(&key.game.title)),
+                key.game_id,
+                &mut item_paths,
+            );
+            (key, item_path)
+        })
+        .collect();
+    let reserved_paths = std::sync::Arc::new(std::sync::Mutex::new(item_paths));
+
+    // Create download tasks; each purchase processes its files sequentially.
+    let download_tasks: Vec<_> = packages
+        .into_iter()
+        .map(|(key, item_path)| {
             let client = client.clone();
             let output_path = output_path.clone();
             let multi_progress = multi_progress.clone();
             let semaphore = semaphore.clone();
-
+            let reserved_paths = reserved_paths.clone();
             tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
 
@@ -619,89 +631,125 @@ async fn download_packages(
                     Ok(uploads) => uploads,
                     Err(e) => {
                         eprintln!("Failed to get uploads for {}: {}", key.game.title, e);
-                        return;
+                        return (0usize, 1usize);
                     }
                 };
 
-                // Find zip file (prefer zip over other formats)
-                let zip_upload = uploads
-                    .iter()
-                    .find(|upload| upload.filename.to_lowercase().ends_with(".zip"));
-
-                let upload = match zip_upload.or_else(|| uploads.first()) {
-                    Some(upload) => upload,
-                    None => {
-                        eprintln!("No uploads found for {}", key.game.title);
-                        return;
-                    }
-                };
-
-                // Create progress bar
-                let progress_bar = multi_progress.add(ProgressBar::new(upload.size));
-                progress_bar.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                        .unwrap()
-                        .progress_chars("#>-"),
+                let plans = plan_downloads(
+                    uploads,
+                    &output_path,
+                    &item_path,
+                    options,
+                    &mut reserved_paths.lock().unwrap(),
                 );
-                progress_bar.set_message(format!("Downloading {}", upload.filename));
+                if plans.is_empty() {
+                    eprintln!("No uploads found for {}", key.game.title);
+                    return (0, 0);
+                }
+                let mut completed = 0;
+                let mut failed = 0;
+                for plan in plans {
+                    let upload = &plan.upload;
+                    let filename = plan.path.file_name().unwrap().to_string_lossy();
+                    let output_dir = plan.path.parent().unwrap().to_path_buf();
+                    if let Err(e) = tokio::fs::create_dir_all(&output_dir).await {
+                        eprintln!("Failed to create directory for {}: {}", upload.filename, e);
+                        failed += 1;
+                        continue;
+                    }
 
-                // Download the file
-                let download_result = client
-                    .download_file(
-                        upload.id,
-                        key.id,
-                        &upload.filename,
-                        &output_path,
-                        progress_bar.clone(),
-                    )
-                    .await;
+                    // Create progress bar
+                    let progress_bar = multi_progress.add(ProgressBar::new(upload.size));
+                    progress_bar.set_style(
+                        ProgressStyle::default_bar()
+                            .template("{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                            .unwrap()
+                            .progress_chars("#>-"),
+                    );
+                    progress_bar.set_message(format!("Downloading {}", upload.filename));
 
-                match download_result {
-                    Ok(()) => {
-                        // If unzip is enabled and the file is a zip, extract it
-                        if unzip && upload.filename.to_lowercase().ends_with(".zip") {
-                            progress_bar.set_message(format!("Extracting {}", upload.filename));
-                            let zip_path = output_path.join(&upload.filename);
+                    // Download the file
+                    let download_result = client
+                        .download_file(
+                            upload.id,
+                            key.id,
+                            &filename,
+                            &output_dir,
+                            progress_bar.clone(),
+                        )
+                        .await;
 
-                            // Create a directory named after the game for extraction
-                            let extract_dir = output_path
-                                .join(&key.game.title.replace("/", "_").replace("\\", "_"));
-
-                            match unzip_file(&zip_path, &extract_dir).await {
-                                Ok(()) => {
-                                    progress_bar.finish_with_message(format!(
-                                        "Downloaded and extracted {}",
-                                        upload.filename
-                                    ));
-                                    // Optionally remove the zip file after extraction
-                                    let _ = tokio::fs::remove_file(&zip_path).await;
+                    match download_result {
+                        Ok(()) => {
+                            // If unzip is enabled and the file is a zip, extract it
+                            if let Some(extract_dir) = plan.extract_to {
+                                progress_bar.set_message(format!("Extracting {}", upload.filename));
+                                let zip_path = &plan.path;
+                                match unzip_file(zip_path, &extract_dir, options.keep_archive_root)
+                                    .await
+                                {
+                                    Ok(()) => {
+                                        progress_bar.finish_with_message(format!(
+                                            "Downloaded and extracted {}",
+                                            upload.filename
+                                        ));
+                                        // Optionally remove the zip file after extraction
+                                        if let Err(e) = tokio::fs::remove_file(zip_path).await {
+                                            eprintln!(
+                                                "Failed to remove {} after extraction: {}",
+                                                filename, e
+                                            );
+                                        }
+                                        completed += 1;
+                                    }
+                                    Err(e) => {
+                                        progress_bar.finish_with_message(format!(
+                                            "Downloaded {} but failed to extract: {}",
+                                            upload.filename, e
+                                        ));
+                                        eprintln!("Failed to extract {}: {}", upload.filename, e);
+                                        failed += 1;
+                                    }
                                 }
-                                Err(e) => {
-                                    progress_bar.finish_with_message(format!(
-                                        "Downloaded {} but failed to extract: {}",
-                                        upload.filename, e
-                                    ));
-                                    eprintln!("Failed to extract {}: {}", upload.filename, e);
-                                }
+                            } else {
+                                progress_bar
+                                    .finish_with_message(format!("Downloaded {}", upload.filename));
+                                completed += 1;
                             }
                         }
-                    }
-                    Err(e) => {
-                        progress_bar.finish_with_message(format!("Failed: {}", e));
-                        eprintln!("Failed to download {}: {}", upload.filename, e);
+                        Err(e) => {
+                            progress_bar.finish_with_message(format!("Failed: {}", e));
+                            eprintln!("Failed to download {}: {}", upload.filename, e);
+                            failed += 1;
+                        }
                     }
                 }
+                (completed, failed)
             })
         })
         .collect();
 
     // Wait for all downloads to complete
+    let mut completed = 0;
+    let mut failed = 0;
     for task in download_tasks {
-        let _ = task.await;
+        match task.await {
+            Ok((successes, failures)) => {
+                completed += successes;
+                failed += failures;
+            }
+            Err(e) => {
+                eprintln!("Download task failed: {}", e);
+                failed += 1;
+            }
+        }
     }
 
-    println!("All downloads completed!");
+    println!(
+        "Downloads finished: {} completed, {} failed.",
+        completed, failed
+    );
+    anyhow::ensure!(failed == 0, "Some downloads or extractions failed");
     Ok(())
 }
 
@@ -723,11 +771,118 @@ async fn main() -> Result<()> {
             title,
             output,
             max_concurrent,
-            unzip,
+            options,
         } => {
-            download_packages(api_key, author, title, output, max_concurrent, unzip).await?;
+            download_packages(api_key, author, title, output, max_concurrent, options).await?;
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_zip(path: &std::path::Path, entries: &[(&str, &str)]) {
+        let mut writer = zip::ZipWriter::new(StdFile::create(path).unwrap());
+        for (name, contents) in entries {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(contents.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn parses_download_options_and_requires_unzip_for_root_flag() {
+        let cli = Cli::try_parse_from([
+            "itch-downloader",
+            "dl",
+            "--all-files",
+            "--layout",
+            "author-title",
+            "--unzip",
+            "--keep-archive-root",
+        ])
+        .unwrap();
+        let Commands::Dl { options, .. } = cli.command else {
+            panic!("Expected dl")
+        };
+        assert!(options.all_files && options.unzip && options.keep_archive_root);
+        assert_eq!(options.layout, downloads::Layout::AuthorTitle);
+        assert!(Cli::try_parse_from(["itch-downloader", "dl", "--keep-archive-root"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn extracts_into_author_title_with_optional_archive_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("assets.zip");
+        write_zip(&archive, &[("original/sprite.txt", "sprite")]);
+        let item = temp.path().join("author/title");
+        unzip_file(&archive, &item, false).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(item.join("sprite.txt")).unwrap(),
+            "sprite"
+        );
+        assert!(!item.join("original").exists());
+        let preserved = temp.path().join("author/preserved");
+        unzip_file(&archive, &preserved, true).await.unwrap();
+        assert!(preserved.join("original/sprite.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn multiple_zips_with_identical_contents_are_isolated() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, content) in [("part1.zip", "one"), ("part2.zip", "two")] {
+            let archive = temp.path().join(name);
+            write_zip(&archive, &[("root/shared.txt", content)]);
+            unzip_file(
+                &archive,
+                &temp
+                    .path()
+                    .join("author/title")
+                    .join(format!("{name}.contents")),
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(
+                temp.path()
+                    .join("author/title/part1.zip.contents/shared.txt")
+            )
+            .unwrap(),
+            "one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                temp.path()
+                    .join("author/title/part2.zip.contents/shared.txt")
+            )
+            .unwrap(),
+            "two"
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_conflict_preserves_existing_files_and_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("assets.zip");
+        write_zip(&archive, &[("shared.txt", "new"), ("other.txt", "other")]);
+        let item = temp.path().join("item");
+        std::fs::create_dir_all(&item).unwrap();
+        std::fs::write(item.join("shared.txt"), "existing").unwrap();
+        assert!(unzip_file(&archive, &item, false).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(item.join("shared.txt")).unwrap(),
+            "existing"
+        );
+        assert!(!item.join("other.txt").exists());
+        assert!(archive.exists());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 2);
+    }
 }
